@@ -1,0 +1,18 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Generated embedding caches (auto-regenerated on first run)
+data/*.npy
+
+# Model download caches
+.cache/
+*.egg-info/
+
+# OS junk
+.DS_Store

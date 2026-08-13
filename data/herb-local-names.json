@@ -1,0 +1,22 @@
+[
+  {"subject": "มะม่วงน้ำดอกไม้", "predicate": "is_local_name_of", "object": "Nam Dok Mai mango"},
+  {"subject": "มะม่วงอกร่อง", "predicate": "is_local_name_of", "object": "Ok Rong mango"},
+  {"subject": "มะม่วงเขียวเสวย", "predicate": "is_local_name_of", "object": "Keow Savoey mango"},
+  {"subject": "มะม่วงฟ้าลั่น", "predicate": "is_local_name_of", "object": "Fah Lan mango"},
+  {"subject": "มะม่วงหนังกลางวัน", "predicate": "is_local_name_of", "object": "Nang Klang Wan mango"},
+  {"subject": "มะม่วงเพชรบ้านลาด", "predicate": "is_local_name_of", "object": "Petchbanlad mango"},
+  {"subject": "Nam Dok Mai mango", "predicate": "grown_in_region", "object": "Central Thailand"},
+  {"subject": "Ok Rong mango", "predicate": "grown_in_region", "object": "Chanthaburi province"},
+  {"subject": "Keow Savoey mango", "predicate": "grown_in_region", "object": "Ratchaburi province"},
+  {"subject": "Nam Dok Mai mango", "predicate": "harvest_season", "object": "March to May"},
+  {"subject": "Ok Rong mango", "predicate": "harvest_season", "object": "April to June"},
+  {"subject": "Keow Savoey mango", "predicate": "eaten_when", "object": "unripe, green stage"},
+  {"subject": "Nam Dok Mai mango", "predicate": "eaten_when", "object": "ripe, yellow stage"},
+  {"subject": "มะม่วง", "predicate": "standard_term_for", "object": "mango, Mangifera indica"},
+  {"subject": "ต้นมะม่วง", "predicate": "standard_term_for", "object": "mango tree"},
+  {"subject": "ดอกมะม่วง", "predicate": "standard_term_for", "object": "mango blossom"},
+  {"subject": "แมลงวันทอง", "predicate": "is_local_name_of", "object": "oriental fruit fly, a common mango pest"},
+  {"subject": "โรคแอนแทรคโนส", "predicate": "is_local_name_of", "object": "anthracnose, a fungal mango disease"},
+  {"subject": "การราดสาร", "predicate": "is_local_name_of", "object": "paclobutrazol soil drenching, an off-season flowering technique"},
+  {"subject": "สวนมะม่วงส่งออก", "predicate": "is_local_name_of", "object": "export-grade mango orchard"}
+]

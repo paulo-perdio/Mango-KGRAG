@@ -1,0 +1,36 @@
+# Web server
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.6
+
+# Core ML
+torch>=2.2
+transformers>=4.40
+sentence-transformers>=2.7
+numpy>=1.26
+scikit-learn>=1.4
+pandas>=2.2
+
+# Ontology / RDF (used for potential future TBox parsing)
+rdflib>=7.0
+
+# Thai NLP
+pythainlp>=5.0
+nltk>=3.8
+
+# Text splitting for RAG chunking
+langchain-text-splitters>=0.0.1
+
+# Evaluation metrics (used in the research notebooks this pipeline grew out of;
+# not required for the /ask endpoint itself, but imported at module load time)
+bert-score>=0.3.13
+rouge>=1.0.1
+rouge-score>=0.1.2
+
+# Config
+python-dotenv>=1.0
+
+# NOTE: pythainlp and torch can be sensitive to exact version combinations,
+# especially on Apple Silicon or CPU-only machines. If you hit install errors,
+# try pinning torch to the CPU-only wheel index:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
