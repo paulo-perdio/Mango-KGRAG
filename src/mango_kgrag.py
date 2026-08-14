@@ -140,7 +140,8 @@ pipe_llama = pipeline(
     temperature=0.3,
     max_new_tokens=120,
     top_k=5,
-    repetition_penalty=1,
+    repetition_penalty=1.05,
+    no_repeat_ngram_size=3
     # top_p = 0.85,
     # do_sample=True
 )
@@ -597,8 +598,8 @@ def smart_answer(query, topk_triples=5, topk_rag=5):
 
     print(f"[DEBUG] Ontology score: {onto_score:.3f} | RAG score: {rag_score:.3f}")
 
-    ONTO_TH = 0.7
-    RAG_TH = 0.74
+    ONTO_TH = 0.7    # leave as-is, it's working
+    RAG_TH = 0.68    # was 0.74 — too strict for a 14-passage demo corpus
     #change value here
     # ONTO_TH = 0
     # RAG_TH = 0

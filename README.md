@@ -93,3 +93,21 @@ the retrieved ontology triples, and the RAG chunks that fed the answer.
   path, matching the original research code's final configuration.
 - No automatic GPU fallback tuning — if you're CPU-only, expect each answer to
   take significantly longer.
+- **The relevance gate can false-positive on off-topic questions that share
+  vocabulary with the ontology.** For example, asking about durian harvest
+  timing can incorrectly trigger KG-RAG mode, because the ontology predicate
+  `harvest_season` shares the word "harvest" with the query. On a small,
+  single-domain sample corpus like this one, a single shared word is a larger
+  fraction of the similarity signal than it would be against a large, diverse
+  corpus (as in the real research dataset). When this happens, the model
+  generates an answer that is not actually grounded in the retrieved data and
+  can include fabricated details. This is a real limitation of max-cosine-
+  similarity gating at this corpus scale, not a bug I've silently patched
+  over — a production system would need a more robust relevance signal (e.g.
+  a trained classifier, or an entity/topic check) rather than a single
+  similarity threshold.
+- Generation quality on Thai output is uneven at the token level (occasional
+  stray characters, occasional date imprecision even when the correct fact was
+  retrieved) — expected behavior for a 1B-parameter model, not something tuned
+  away by adjusting `repetition_penalty` alone (see commit history for what
+  was tried).
