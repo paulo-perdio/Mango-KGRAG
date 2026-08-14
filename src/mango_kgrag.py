@@ -467,7 +467,6 @@ def is_chitchat_query(query: str) -> bool:
         return True
 
     # very short non-informational queries
-    #fix this later
     if len(q) <= 4:
         return True
 
