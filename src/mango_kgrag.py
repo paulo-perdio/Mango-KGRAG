@@ -1,22 +1,12 @@
 import torch
-from rdflib import Graph, Literal
-from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline, AutoModelForSeq2SeqLM, AutoModel
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline, AutoModel
 import numpy as np
 import torch.nn.functional as F
 import json
 from sklearn.metrics.pairwise import cosine_similarity
-import time
-import pandas as pd
 import os
-from pythainlp.tokenize import word_tokenize
-from nltk.util import ngrams
-from transformers import BertTokenizer, BertForMaskedLM, BertModel
-from bert_score import BERTScorer
-from rouge import Rouge
-from rouge_score import rouge_scorer
 from sentence_transformers import CrossEncoder
-from langchain_text_splitters import CharacterTextSplitter, RecursiveCharacterTextSplitter
-import re
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # ----------------------------
 # CONFIGURATION
@@ -40,53 +30,26 @@ if not HF_TOKEN:
 
 DEVICE = 0 if torch.cuda.is_available() else -1
 
+# Which retrieval strategy answer_with_rag_and_ontology uses for ontology
+# triples. Was previously hardcoded inline as `MODE = "hybrid"` inside the
+# function body -- pulled out to module config so it's not magic, and can be
+# overridden without editing code (e.g. RETRIEVAL_MODE=dense for local testing).
+RETRIEVAL_MODE = os.environ.get("RETRIEVAL_MODE", "hybrid")  # dense | hybrid | cross
+
 TBOX_PATH = str(DATA_DIR / "herb-local-names.json")
 LOCAL_RAG_DB_JSONL = str(DATA_DIR / "new_rag_data.jsonl")
 
 # ----------------------------
-# LOAD MULTILINGUAL TRANSLATION MODEL (NLLB-200)
+# NOTE: Thai/Japanese -> English translation (NLLB-200) removed.
 # ----------------------------
-print("Loading multilingual translation model (NLLB-200)...")
-nllb_model_name = "facebook/nllb-200-distilled-600M"
-tokenizer = AutoTokenizer.from_pretrained(nllb_model_name)
-model = AutoModelForSeq2SeqLM.from_pretrained(nllb_model_name)
-translator = pipeline(
-    task="text-generation",
-    model=model,
-    tokenizer=tokenizer,
-    device=DEVICE,
-)
-
-def translate(text, src_lang, tgt_lang):
-    tokenizer.src_lang = src_lang
-    outputs = translator(
-        text,
-        forced_bos_token_id=tokenizer.convert_tokens_to_ids(tgt_lang),
-        max_length=400,
-    )
-    return outputs[0]["generated_text"]
-
-
-def thai_to_english(text):
-    return translate(text, src_lang="tha_Latn", tgt_lang="eng_Latn")
-
-def english_to_thai(text):
-    return translate(text, src_lang="eng_Latn", tgt_lang="tha_Latn")
-
-def japanese_to_english(text):
-    """
-    Translates text if it contains Japanese characters using the loaded NLLB model.
-    """
-    text = str(text)
-    # Simple check for Japanese unicode ranges (Hiragana, Katakana, CJK Unified Ideographs)
-    is_japanese = any("\u3040" <= char <= "\u309f" or 
-                      "\u30a0" <= char <= "\u30ff" or 
-                      "\u4e00" <= char <= "\u9faf" for char in text)
-    
-    if is_japanese:
-        # jpn_Jpan is the NLLB code for Japanese
-        return translate(text, src_lang="jpn_Jpan", tgt_lang="eng_Latn")
-    return text
+# The original research code translated the user's query to English before
+# ontology/RAG retrieval. In this deployed app, `query_en = query` (no
+# translation actually happens) -- see the Known Limitations section of the
+# README. Loading NLLB-200 (facebook/nllb-200-distilled-600M) just to never
+# call it was adding several hundred MB and real startup time for nothing.
+# If real translation is reinstated later, add the model load and the
+# translate()/thai_to_english()/english_to_thai() functions back here, and
+# actually call thai_to_english() where query_en is assigned below.
 
 # ----------------------------
 # LOAD LLAMA MODEL and reranker
@@ -94,19 +57,13 @@ def japanese_to_english(text):
 print("Loading Llama model...")
 reranker = CrossEncoder(
     "cross-encoder/ms-marco-MiniLM-L-12-v2",
-    # "cross-encoder/ms-marco-MiniLM-L-6-v2",
     device="cuda" if torch.cuda.is_available() else "cpu"
 )
 
 def rerank_chunks(query, chunks, top_k=3):
     pairs = [(query, chunk) for chunk in chunks]
     scores = reranker.predict(pairs)
-
-    ranked = sorted(
-        zip(chunks, scores),
-        key=lambda x: x[1],
-        reverse=True
-    )
+    ranked = sorted(zip(chunks, scores), key=lambda x: x[1], reverse=True)
     return [c for c, s in ranked[:top_k]]
 
 def rerank_with_ontology(query, chunks, triples, alpha=0.8):
@@ -117,19 +74,14 @@ def rerank_with_ontology(query, chunks, triples, alpha=0.8):
         f"{t['subject']} {t['predicate']} {t['object']}"
         for t in triples
     )
-
     t_pairs = [(triple_text, c) for c in chunks]
     t_scores = reranker.predict(t_pairs)
 
-    final = [
-        (c, alpha*q + (1-alpha)*t)
-        for c, q, t in zip(chunks, q_scores, t_scores)
-    ]
-
+    final = [(c, alpha * q + (1 - alpha) * t) for c, q, t in zip(chunks, q_scores, t_scores)]
     return [c for c, _ in sorted(final, key=lambda x: x[1], reverse=True)[:3]]
 
 
-tokenizer_llama = AutoTokenizer.from_pretrained(MODEL_NAME, token = HF_TOKEN)
+tokenizer_llama = AutoTokenizer.from_pretrained(MODEL_NAME, token=HF_TOKEN)
 model_llama = AutoModelForCausalLM.from_pretrained(MODEL_NAME, token=HF_TOKEN)
 pipe_llama = pipeline(
     "text-generation",
@@ -137,11 +89,24 @@ pipe_llama = pipeline(
     tokenizer=tokenizer_llama,
     torch_dtype=torch.bfloat16,
     device=DEVICE,
-    temperature=0.3,
-    max_new_tokens=120,
-    top_k=5,
+    # do_sample=False (explicit): the Llama-3.2-1B-Instruct checkpoint's own
+    # generation_config.json ships with do_sample=True by default. Without
+    # this line, that default silently wins -- the same query can produce a
+    # different answer on every run, with no error and no obvious cause. For
+    # a repo meant to let someone else reproduce this project, deterministic
+    # output matters: same input -> same output, every time, on any machine.
+    # Set do_sample=True instead if you want varied phrasing on repeat runs,
+    # but treat that as a deliberate choice, not a default to inherit blind.
+    do_sample=False,
+    max_new_tokens=120,  # Tried raising this to 220 to test whether longer answers
+                         # were being cut off mid-thought. They were, but that wasn't
+                         # the real problem: past ~120 tokens the model doesn't finish
+                         # a coherent answer, it wanders into unrelated, invented
+                         # content (see README Known Limitations). Reverted -- 120
+                         # fails by stopping early, which is the less-bad failure mode
+                         # than 220's fails-by-hallucinating-further.
     repetition_penalty=1.05,
-    no_repeat_ngram_size=3,    # blocks exact 3-word-phrase loops directly
+    no_repeat_ngram_size=3,
 )
 
 # ----------------------------
@@ -153,27 +118,16 @@ def load_ontology_triples(json_path: str):
         data = json.load(f)
 
     clean_triples = []
-    
-    # 1. First Pass: Load Raw Data & Collect text to translate
     print("Parsing JSON structure...")
     for item in data:
         entry = {}
-        # Check type and extract raw values
         if "subject" in item:
             entry = {
                 "subject": item.get("subject"),
                 "predicate": item.get("predicate"),
                 "object": item.get("object"),
-                "type": "standard"
+                "type": "standard",
             }
-        # elif "class" in item:
-        #     entry = {
-        #         "subject": item.get("class"),
-        #         "predicate": item.get("on property"),
-        #         "object": item.get("all values from"),
-        #         "type": "restriction"
-        #     }
-            
         if entry.get("subject") and entry.get("predicate") and entry.get("object"):
             clean_triples.append(entry)
 
@@ -181,67 +135,47 @@ def load_ontology_triples(json_path: str):
     return clean_triples
 
 ONTOLOGY_TRIPLES = load_ontology_triples(TBOX_PATH)
+
 def local_name(uri: str) -> str:
     return uri.split("#")[-1].split("/")[-1]
 
 def verbalize_triple(triple):
-    """
-    Converts a triple dictionary into a natural language sentence 
-    based on its type.
-    """
-    s = triple["subject"]
-    p = triple["predicate"]
-    o = triple["object"]
+    """Converts a triple dict into a natural language sentence."""
+    s, p, o = triple["subject"], triple["predicate"], triple["object"]
     t_type = triple.get("type", "standard")
 
     if t_type == "restriction":
-        # Format: "Basic Work on property Purpose takes values from Farming"
         return f"{s} on property {p} takes values from {o}"
-    else:
-        # Format: "Subject Predicate Object"
-        # Optional: Make 'label' sound better
-        if "label" in p.lower():
-             return f"{s} is called {o}"
-        return f"{s} {p} {o}"
+    if "label" in p.lower():
+        return f"{s} is called {o}"
+    return f"{s} {p} {o}"
 
 def expand_triples_for_prompt(triples):
     expanded = []
     for t in triples:
-        # Use the smart verbalization logic defined above
         text = verbalize_triple(t)
         expanded.append(text)
-        
-        # Add extra semantic expansions if needed
-        s = t["subject"]
-        o = t["object"]
-        expanded.append(f"{s} involves {o}")
-
+        expanded.append(f"{t['subject']} involves {t['object']}")
     return list(dict.fromkeys(expanded))
 
 # ----------------------------
 # EMBEDDING MODEL (BGE-M3)
 # ----------------------------
-bge_tokenizer = AutoTokenizer.from_pretrained(EMBED_MODEL)
-bge_model = AutoModel.from_pretrained(EMBED_MODEL)
+# NOTE: previously loaded TWICE under two names (bge_tokenizer/bge_model for
+# ontology triples, rag_tokenizer/rag_model for RAG chunks) -- same model,
+# same weights, loaded into memory independently. Now loaded once and shared
+# by both embed_text() (below) and the ontology/RAG embedding steps that
+# used to have their own near-duplicate get_embedding() function.
+embed_tokenizer = AutoTokenizer.from_pretrained(EMBED_MODEL)
+embed_model = AutoModel.from_pretrained(EMBED_MODEL)
 
-# def embed_text(text: str) -> np.ndarray:
-#     inputs = bge_tokenizer(text, return_tensors="pt", truncation=True, padding=True)
-#     with torch.no_grad():
-#         outputs = bge_model(**inputs)
-#     embeddings = F.normalize(outputs.last_hidden_state[:, 0], p=2, dim=1)
-#     return embeddings[0].cpu().numpy()
 def embed_text(text: str) -> np.ndarray:
-    inputs = bge_tokenizer(
-        text,
-        return_tensors="pt",
-        truncation=True,
-        padding=True,
-        max_length=512
+    inputs = embed_tokenizer(
+        text, return_tensors="pt", truncation=True, padding=True, max_length=512
     )
     with torch.no_grad():
-        outputs = bge_model(**inputs)
-
-    # mean pooling (CORRECT for bge-m3)
+        outputs = embed_model(**inputs)
+    # mean pooling (correct for bge-m3)
     emb = outputs.last_hidden_state.mean(dim=1)
     emb = F.normalize(emb, p=2, dim=1)
     return emb[0].cpu().numpy()
@@ -252,14 +186,10 @@ def embed_query(text):
 def embed_passage(text):
     return embed_text("Represent this passage for retrieval: " + text)
 
-
-
-# Embed TBox triples
 # ----------------------------
 # CACHE TBOX EMBEDDINGS
 # ----------------------------
 TRIPLE_EMB_PATH = str(DATA_DIR / "triple_embeddings_json_herb.npy")
-
 triple_texts = [verbalize_triple(t) for t in ONTOLOGY_TRIPLES]
 
 if os.path.exists(TRIPLE_EMB_PATH):
@@ -270,94 +200,43 @@ else:
     triple_embeddings = np.vstack([embed_text(txt) for txt in triple_texts])
     np.save(TRIPLE_EMB_PATH, triple_embeddings)
 
-def get_relevant_triples(query: str, top_k=5):
-    # q_emb = embed_text(query)
-    q_emb = embed_query(query)
-    sims = np.dot(triple_embeddings, q_emb)
-    top_idx = np.argsort(sims)[::-1][:top_k]
-    return [ONTOLOGY_TRIPLES[i] for i in top_idx]
-
-
-
-
-def retrieve_tbox_dense(query, top_k=5):
-    q_emb = embed_text(query)
+def retrieve_tbox_dense(query, top_k=5, q_emb=None):
+    if q_emb is None:
+        q_emb = embed_query(query)
     sims = np.dot(triple_embeddings, q_emb)
     idx = np.argsort(sims)[::-1][:top_k]
     return [ONTOLOGY_TRIPLES[i] for i in idx]
 
-def lexical_filter(query, triples, min_overlap=1):
-    q_tokens = set(query.lower().split())
-    candidates = []
-
-    for t in triples:
-        text = verbalize_triple(t).lower()
-        t_tokens = set(text.split())
-        if len(q_tokens & t_tokens) >= min_overlap:
-            candidates.append(t)
-
-    return candidates
-
-# def retrieve_tbox_hybrid(query_en, top_k=5, pre_k=30):
-#     # Step 1: lexical filter
-#     filtered = lexical_filter(query_en.lower(), ONTOLOGY_TRIPLES)
-
-#     if len(filtered) == 0:
-#         filtered = ONTOLOGY_TRIPLES  # fallback
-
-#     # Step 2: dense embedding
-#     texts = [verbalize_triple(t) for t in filtered]
-#     embs = np.vstack([embed_text(t) for t in texts])
-
-#     q_emb = embed_text(query_en)
-#     sims = np.dot(embs, q_emb)
-
-#     idx = np.argsort(sims)[::-1][:top_k]
-#     return [filtered[i] for i in idx]
-
-def retrieve_tbox_hybrid(query_en, top_k=5):
-    # 1. Lexical Filter (Keyword Match)
-    # Get indices of triples that match keywords
+def retrieve_tbox_hybrid(query_en, top_k=5, q_emb=None):
+    # 1. Lexical filter (keyword match)
     q_tokens = set(query_en.lower().split())
     candidate_indices = []
-    
     for i, t in enumerate(ONTOLOGY_TRIPLES):
-        text = verbalize_triple(t).lower()
-        t_tokens = set(text.split())
-        if len(q_tokens & t_tokens) >= 1: # Min overlap
+        t_tokens = set(verbalize_triple(t).lower().split())
+        if len(q_tokens & t_tokens) >= 1:
             candidate_indices.append(i)
 
-    # 2. Fallback: If no keywords match, consider ALL triples
+    # 2. Fallback: no keyword match -> consider all triples
     if not candidate_indices:
         candidate_indices = list(range(len(ONTOLOGY_TRIPLES)))
 
-    # 3. Dense Scoring using CACHE (Fast!)
-    # We only look at the rows in triple_embeddings that match our candidates
-    candidate_embs = triple_embeddings[candidate_indices] 
-    
-    q_emb = embed_query(query_en)
-    
-    # Calculate Similarity only for candidates
+    # 3. Dense scoring using cache. Accepts a precomputed q_emb so callers
+    # that already embedded this exact query text (e.g. smart_answer) don't
+    # pay for a second forward pass on the same string.
+    candidate_embs = triple_embeddings[candidate_indices]
+    if q_emb is None:
+        q_emb = embed_query(query_en)
     sims = np.dot(candidate_embs, q_emb)
-    
-    # Get top K relative to the candidate list
-    top_k_local_indices = np.argsort(sims)[::-1][:top_k]
-    
-    # Map back to original global indices
-    final_indices = [candidate_indices[i] for i in top_k_local_indices]
-    
+
+    top_k_local = np.argsort(sims)[::-1][:top_k]
+    final_indices = [candidate_indices[i] for i in top_k_local]
     return [ONTOLOGY_TRIPLES[i] for i in final_indices]
+
 def retrieve_tbox_crossencoder(query, top_k=5):
     texts = [verbalize_triple(t) for t in ONTOLOGY_TRIPLES]
     pairs = [(query, t) for t in texts]
-
     scores = reranker.predict(pairs)
-    ranked = sorted(
-        zip(ONTOLOGY_TRIPLES, scores),
-        key=lambda x: x[1],
-        reverse=True
-    )
-
+    ranked = sorted(zip(ONTOLOGY_TRIPLES, scores), key=lambda x: x[1], reverse=True)
     return [t for t, _ in ranked[:top_k]]
 
 # ----------------------------
@@ -371,115 +250,85 @@ texts = [json.loads(d["json"])["text"] for d in local_data]
 splitter = RecursiveCharacterTextSplitter(
     chunk_size=300,
     chunk_overlap=80,
-    # separators=["\n\n", "\n", ".", "!", "?", " "]
-    # separators=[".", "!", "?", "\n"]
-    separators=["\n\n", "\n", " ", ""]
+    separators=["\n\n", "\n", " ", ""],
 )
-
 split_docs = splitter.create_documents(texts)
 split_texts = [d.page_content for d in split_docs]
-
-# Embed RAG texts
-rag_tokenizer = AutoTokenizer.from_pretrained(EMBED_MODEL)
-rag_model = AutoModel.from_pretrained(EMBED_MODEL)
-
-def get_embedding(text) -> np.ndarray:
-    # inputs = rag_tokenizer(text, return_tensors="pt", truncation=True, padding=True)
-    # with torch.no_grad():
-    #     outputs = rag_model(**inputs)
-    # return outputs.last_hidden_state[:, 0, :].squeeze().numpy()
-    inputs = rag_tokenizer(
-        text,
-        return_tensors="pt",
-        truncation=True,
-        padding=True,
-        max_length=512
-    )
-    with torch.no_grad():
-        outputs = rag_model(**inputs)
-
-    # mean pooling (CORRECT for bge-m3)
-    emb = outputs.last_hidden_state.mean(dim=1)
-    emb = F.normalize(emb, p=2, dim=1)
-    return emb[0].cpu().numpy()
-
-
 
 # ----------------------------
 # CACHE RAG EMBEDDINGS
 # ----------------------------
 RAG_EMB_PATH = str(DATA_DIR / "rag_embeddingsnew_herb.npy")
 
-
 if os.path.exists(RAG_EMB_PATH):
     print("Loading cached RAG embeddings...")
     rag_embeddings = np.load(RAG_EMB_PATH)
 else:
     print("Computing RAG embeddings...")
-    # rag_embeddings = np.array([get_embedding(text) for text in split_texts])
     rag_embeddings = np.array([embed_passage(text) for text in split_texts])
     np.save(RAG_EMB_PATH, rag_embeddings)
 
-def retrieve_locally(query, top_k=5):
-    # q_emb = get_embedding(query).reshape(1, -1)
-    q_emb = embed_query(query).reshape(1, -1)
+def retrieve_locally(query, top_k=5, q_emb=None):
+    if q_emb is None:
+        q_emb = embed_query(query)
+    q_emb = q_emb.reshape(1, -1)
     sims = cosine_similarity(rag_embeddings, q_emb).squeeze()
     top_indices = np.argsort(sims)[::-1][:top_k]
     return [split_texts[i] for i in top_indices]
 
-def ontology_relevance_score(query):
-    q_emb = embed_query(query)
+def ontology_relevance_score(query, q_emb=None):
+    if q_emb is None:
+        q_emb = embed_query(query)
     sims = np.dot(triple_embeddings, q_emb)
     return float(np.max(sims))
 
-def rag_relevance_score(query):
-    q_emb = embed_query(query).reshape(1, -1)
-    sims = cosine_similarity(rag_embeddings, q_emb).squeeze()
+def rag_relevance_score(query, q_emb=None):
+    if q_emb is None:
+        q_emb = embed_query(query)
+    sims = cosine_similarity(rag_embeddings, q_emb.reshape(1, -1)).squeeze()
     return float(np.max(sims))
-
 
 # ----------------------------
 # UTILS
 # ----------------------------
 def truncate_text(text, max_chars=300):
     return text[:max_chars].strip() + ("..." if len(text) > max_chars else "")
+
 DOMAIN_KEYWORDS = set(
     word.lower()
     for t in ONTOLOGY_TRIPLES
     for word in verbalize_triple(t).split()
     if len(word) > 2
 )
+
+CHITCHAT_PHRASES = {
+    "hello", "hi", "hey",
+    "สวัสดี", "สวัสดีครับ", "สวัสดีค่ะ",
+    "หวัดดี", "ดีครับ", "ดีค่ะ",
+    "thank you", "thanks", "ขอบคุณ",
+    "bye", "goodbye", "ลาก่อน",
+}
+
 def is_chitchat_query(query: str) -> bool:
+    """
+    Was previously: exact-match against CHITCHAT_PHRASES, OR any query
+    <= 4 characters. That second rule was too aggressive -- several short
+    but legitimate Thai questions are <= 4 characters and would have been
+    silently routed away from retrieval. Narrowed to <= 2 characters, which
+    catches things like "ok"/single acknowledgements without swallowing
+    short real questions. Still a blunt heuristic -- worth swapping for a
+    small intent classifier if this goes beyond demo scope.
+    """
     q = query.lower().strip()
-
-    # greetings / small talk
-    CHITCHAT = {
-        "hello", "hi", "hey",
-        "สวัสดี", "สวัสดีครับ", "สวัสดีค่ะ",
-        "หวัดดี", "ดีครับ", "ดีค่ะ",
-        "thank you", "thanks", "ขอบคุณ",
-        "bye", "goodbye", "ลาก่อน"
-    }
-
-    if q in CHITCHAT:
+    if q in CHITCHAT_PHRASES:
         return True
-
-    # very short non-informational queries
-    #fix this later
-    if len(q) <= 4:
+    if len(q) <= 2:
         return True
-
     return False
-
-
 
 # ----------------------------
 # MAIN FUNCTION: Query + TBox -> RAG
 # ----------------------------
-# ----------------------------
-# CONFIGURATION
-# ----------------------------
-
 def answer_with_llama_only(query):
     prompt = f"""
 คุณเป็นผู้ช่วย AI ที่สุภาพและเป็นมิตร
@@ -493,56 +342,33 @@ def answer_with_llama_only(query):
     output = pipe_llama(prompt)[0]["generated_text"]
     return output.split("คำตอบ:")[-1].strip().replace("\n", " ")
 
-def answer_with_rag_and_ontology(query: str, topk_triples=5, topk_rag=5):
+def answer_with_rag_and_ontology(query: str, topk_triples=5, topk_rag=5, q_emb=None):
     original_query = query
 
-    # Step 1: Translate query to English for ontology search
-    # query_en = thai_to_english(query)
+    # Translation step removed -- see note near the top of this file.
     query_en = query
 
+    if q_emb is None:
+        q_emb = embed_query(query_en)
 
-    # Step 2: Retrieve top ontology triples (in English)
-    # top_triples = get_relevant_triples(query_en, top_k=topk_triples)
-    MODE = "hybrid"  # dense | hybrid | cross
-
-    if MODE == "dense":
-        top_triples = retrieve_tbox_dense(query_en, topk_triples)
-    elif MODE == "hybrid":
-        top_triples = retrieve_tbox_hybrid(query_en, topk_triples)
-    elif MODE == "cross":
+    if RETRIEVAL_MODE == "dense":
+        top_triples = retrieve_tbox_dense(query_en, topk_triples, q_emb=q_emb)
+    elif RETRIEVAL_MODE == "cross":
         top_triples = retrieve_tbox_crossencoder(query_en, topk_triples)
-
+    else:
+        top_triples = retrieve_tbox_hybrid(query_en, topk_triples, q_emb=q_emb)
 
     expanded_triples = expand_triples_for_prompt(top_triples)
-    triple_text_block = " ".join(expanded_triples)
-    triple_text_block_trunc = truncate_text(triple_text_block, 500)
+    triple_text_block_trunc = truncate_text(" ".join(expanded_triples), 500)
 
+    # This is a DIFFERENT string than query_en (it includes the triple
+    # context), so it genuinely needs its own embedding -- not reusable
+    # from q_emb above.
     expanded_query = "From context in Knowledge Graph: " + triple_text_block_trunc + " User question: " + query
-    # print(expanded_query)
 
-
-    # Step 5: Retrieve RAG chunks
-    # rag_candidates = retrieve_locally(original_query, top_k=topk_rag)
-
-    # rag_chunks = rerank_chunks(original_query, rag_candidates, top_k=5)
     rag_candidates = retrieve_locally(expanded_query, top_k=topk_rag)
-
     rag_chunks = rerank_chunks(expanded_query, rag_candidates, top_k=5)
-
     best_rag_chunk = " ".join(rag_chunks)
-
-    def log_triples(triples):
-        return " | ".join([verbalize_triple(t) for t in triples])
-
-
-    # Step 6: Build prompt for Llama
-# maybe used within prompt
-# Ontology triples :
-# {triple_text_block_trunc}
-
-# RAG context:
-# {" ".join(rag_chunks_trunc)}
-
 
     prompt = f"""
 คุณเป็นผู้เชี่ยวชาญด้านการปลูกและการผลิตมะม่วง
@@ -566,8 +392,6 @@ RAG context:
 
 คำตอบ:
 """.strip()
-    
-    print(prompt)
 
     output = pipe_llama(prompt)[0]["generated_text"]
     answer = output.split("คำตอบ:")[-1].strip().replace("\n", " ")
@@ -577,56 +401,48 @@ RAG context:
     return {
         "ontology_triples": top_triples,
         "rag_chunks_list": rag_chunks,
-        "answer": answer
+        "answer": answer,
     }
 
 def smart_answer(query, topk_triples=5, topk_rag=5):
-
-    # 1️⃣ hard rule: chit-chat → llama
+    # 1. Hard rule: chit-chat -> llama only, no retrieval
     if is_chitchat_query(query):
         return {
             "mode": "llama_only",
             "answer": answer_with_llama_only(query),
-            "ontology_triples": []
+            "ontology_triples": [],
         }
 
-    # 2️⃣ semantic relevance (ONLY for real questions)
-    onto_score = ontology_relevance_score(query)
-    rag_score = rag_relevance_score(query)
+    # 2. Semantic relevance check (only for real questions).
+    # Embed the query ONCE here and pass it through to both relevance
+    # checks and retrieval -- previously this same string was embedded
+    # up to 3 separate times (ontology_relevance_score, rag_relevance_score,
+    # retrieve_tbox_hybrid) with no caching.
+    q_emb = embed_query(query)
+    onto_score = ontology_relevance_score(query, q_emb=q_emb)
+    rag_score = rag_relevance_score(query, q_emb=q_emb)
 
     print(f"[DEBUG] Ontology score: {onto_score:.3f} | RAG score: {rag_score:.3f}")
 
-    ONTO_TH = 0.7    # leave as-is, it's working
-    RAG_TH = 0.68    # was 0.74 — too strict for a 14-passage demo corpus
-    #change value here
-    # ONTO_TH = 0
-    # RAG_TH = 0
+    ONTO_TH = 0.7   # leave as-is, it's working
+    RAG_TH = 0.68   # was 0.74 -- too strict for a 14-passage demo corpus
 
     if onto_score >= ONTO_TH and rag_score >= RAG_TH:
-
-        result = answer_with_rag_and_ontology(query, topk_triples, topk_rag)
-
+        result = answer_with_rag_and_ontology(query, topk_triples, topk_rag, q_emb=q_emb)
         result["mode"] = "kgrag"
         result["triple_texts"] = " | ".join(
             verbalize_triple(t) for t in result["ontology_triples"]
         )
-
-        result["rag_chunks"] = " | ".join(
-            result["rag_chunks_list"]
-        )
-
+        result["rag_chunks"] = " | ".join(result["rag_chunks_list"])
         return result
 
-    else:
-        return {
-            "mode": "llama_only",
-            "answer": answer_with_llama_only(query),
-            "ontology_triples": [],
-            "triple_texts": "",
-            "rag_chunks": ""
-        }
-
-
+    return {
+        "mode": "llama_only",
+        "answer": answer_with_llama_only(query),
+        "ontology_triples": [],
+        "triple_texts": "",
+        "rag_chunks": "",
+    }
 
 # ----------------------------
 # SIMPLE WHILE TRUE LOOP
@@ -635,7 +451,7 @@ if __name__ == "__main__":
     print("\n--- Mango AI Ready (Type 'exit' to quit) ---")
     while True:
         user_q = input("\nถามคำถาม: ").strip()
-        if user_q.lower() in ['exit', 'quit']:
+        if user_q.lower() in ["exit", "quit"]:
             break
 
         result = smart_answer(user_q)
