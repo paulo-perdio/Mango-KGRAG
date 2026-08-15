@@ -1,4 +1,4 @@
-# Mango AI — Knowledge Graph-Driven RAG for Local Thai Plant Nomenclature
+<img width="1556" height="784" alt="preview (1)" src="https://github.com/user-attachments/assets/ce40b748-e6e6-4cba-ab1a-97240ed52cf6" /># Mango AI — Knowledge Graph-Driven RAG for Local Thai Plant Nomenclature
 
 A small FastAPI chatbot that answers Thai-language questions about mango cultivation
 by combining a knowledge-graph query-expansion step with retrieval-augmented
@@ -84,7 +84,11 @@ cache and start in seconds.
 The debug panel on the right shows which mode was used (`kgrag` vs `llama_only`),
 the retrieved ontology triples, and the RAG chunks that fed the answer.
 
-## Known limitations of this demo
+<img width="1556" height="784" alt="preview (1)" src="https://github.com/user-attachments/assets/3d58b5d5-788f-4acf-aae4-308e6a1e0d2a" />
+<img width="1568" height="709" alt="preview (2)" src="https://github.com/user-attachments/assets/8760ace8-c677-4294-ba34-5738a7bfeed7" />
+<img width="1548" height="784" alt="preview" src="https://github.com/user-attachments/assets/30b13696-9d53-4065-b12f-80c537023bcb" />
+
+## Known Limitations
 
 - The sample ontology (20 triples) and RAG corpus (14 passages) are intentionally
   small — enough to demonstrate the pipeline working end-to-end, not to reproduce
