@@ -1,4 +1,4 @@
-<img width="1556" height="784" alt="preview (1)" src="https://github.com/user-attachments/assets/ce40b748-e6e6-4cba-ab1a-97240ed52cf6" /># Mango AI — Knowledge Graph-Driven RAG for Local Thai Plant Nomenclature
+# Mango AI — Knowledge Graph-Driven RAG for Local Thai Plant Nomenclature
 
 A small FastAPI chatbot that answers Thai-language questions about mango cultivation
 by combining a knowledge-graph query-expansion step with retrieval-augmented
