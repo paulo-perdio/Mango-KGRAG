@@ -7,6 +7,17 @@ generation (KG-RAG). Built from the engineering behind my KMITL capstone project
 Thai Herb Nomenclature"* (Anon Thongsawaeng, John Paul L. Perdio, Phalat Kraichoke;
 advisor: Assoc. Prof. Dr. Rathachai Chawuthai, KMITL, 2025–2026).
 
+## Background
+
+This project builds on the KMITL capstone *"Knowledge Graph-Driven Prompt
+Augmentation for RAG Systems: A Case Study of Local Thai Herb Nomenclature"*
+(Anon Thongsawaeng, John Paul L. Perdio, Phalat Kraichoke; advisor: Assoc.
+Prof. Dr. Rathachai Chawuthai, KMITL, 2025–2026). The real, published
+findings — a 200x average retrieval-rank improvement from KG-based query
+expansion, and a 16% increase in answerable questions from reranking — are
+in the full report:
+[`docs/Knowledge Graph-Driven Prompt Augmentation for RAG Systems_ A Case Study of Local Plant Nomenclature_Signature.pdf`](docs/Knowledge%20Graph-Driven%20Prompt%20Augmentation%20for%20RAG%20Systems_%20A%20Case%20Study%20of%20Local%20Plant%20Nomenclature_Signature.pdf)
+
 ## What's real vs. what's a stand-in
 
 The capstone's actual knowledge graph (the CAVOC ontology, provided by our advisor)
@@ -14,11 +25,8 @@ and its 100-question benchmark are private research data and aren't included her
 **The data in `/data` in this repo is a small dataset I wrote myself**, in the same
 format the pipeline expects, so the app is fully runnable end-to-end by anyone who
 clones it. It is not the original research corpus, and the numbers you get from
-running it are not the paper's reported results.
-
-For the real, published findings — a 200x average retrieval-rank improvement from
-KG-based query expansion, and a 16% increase in answerable questions from reranking —
-see the capstone report.
+running it are not the paper's reported results — see the Background section
+above for the actual numbers and a link to the full report.
 
 ## Architecture
 
